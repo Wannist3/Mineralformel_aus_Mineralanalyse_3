@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
+from mineral_formula import calculate_mineral_formula, format_mineral_formula
+
 # Titel der App
 st.title("Mineralformel-Rechner")
 st.markdown(
@@ -201,91 +203,7 @@ basis_oxygen = basis_oxygen_map.get(mineral_group, 3)
 if mineral_group == "Allgemein":
     basis_oxygen = st.number_input("Basis-Sauerstoffatome", min_value=1, value=3, step=1)
 
-# Funktion zur Formatierung der Mineralformel (korrigiert)
-def format_mineral_formula(cations, basis_oxygen, mineral_group):
-    subscripts = str.maketrans("0123456789.", "₀₁₂₃₄₅₆₇₈₉.")
-    superscripts = str.maketrans("23+", "²³⁺")
-
-    # Verwende die mineralgruppenspezifische Element-Reihenfolge
-    cation_order = element_order.get(mineral_group, element_order["default"])
-
-    formula_parts = []
-    for element in cation_order:
-        if element in cations:
-            value = cations[element]
-            if value >= 0.01:  # Nur signifikante Werte anzeigen
-                part = element
-                # Ladungsangabe formatieren
-                if "+" in element:
-                    part = part.translate(superscripts)
-                # Stöchiometrischen Koeffizienten formatieren
-                coeff = f"{value:.2f}".rstrip("0").rstrip(".")
-                if coeff != "1":
-                    part += coeff.translate(subscripts)
-                formula_parts.append(part)
-
-    oxygen_str = "O"
-    if isinstance(basis_oxygen, float):
-        if basis_oxygen.is_integer():
-            oxygen_str += str(int(basis_oxygen))
-        else:
-            oxygen_str += f"{basis_oxygen:.1f}".rstrip("0").rstrip(".").translate(subscripts)
-    else:
-        oxygen_str += str(basis_oxygen)
-
-    formula_parts.append(oxygen_str)
-    return "".join(formula_parts)
-
-def calculate_mineral_formula(oxide_values, basis_oxygen, mineral_group):
-    mol_numbers = {}
-    element_moles = {}
-    total_oxygen = 0.0
-
-    for oxide, weight in oxide_values.items():
-        if weight > 0 and oxide in molar_masses:
-            mol_number = weight / molar_masses[oxide]
-            mol_numbers[oxide] = mol_number
-            for element, count in elements_per_oxide[oxide].items():
-                if element == "O":
-                    total_oxygen += count * mol_number
-                else:
-                    element_moles[element] = element_moles.get(element, 0.0) + count * mol_number
-
-    if total_oxygen == 0:
-        return None
-
-    normalization_factor = basis_oxygen / total_oxygen
-    cations = {
-        element: moles * normalization_factor
-        for element, moles in element_moles.items()
-    }
-
-    # Sonderbehandlung für Pyroxene
-    if mineral_group == "Pyroxen":
-        total_fe_initial = cations.get("Fe2+", 0.0) + cations.get("Fe3+", 0.0)
-
-        # Remove initial Fe species from cations for re-distribution
-        if "Fe2+" in cations:
-            del cations["Fe2+"]
-        if "Fe3+" in cations:
-            del cations["Fe3+"]
-
-        if total_fe_initial > 0:
-            # Apply the 10/90 split for total iron
-            fe3_pyroxene = total_fe_initial * 0.1
-            fe2_pyroxene = total_fe_initial * 0.9
-
-            # Update cations dictionary with the new split
-            cations["Fe3+"] = fe3_pyroxene
-            cations["Fe2+"] = fe2_pyroxene
-
-    return {
-        "cations": cations,
-        "formula": format_mineral_formula(cations, basis_oxygen, mineral_group),
-        "basis_oxygen": basis_oxygen,
-        "total_cations": sum(cations.values()),
-        "normalization_factor": normalization_factor
-    }
+# Die Formelausgabe wird über die zentrale Stoichiometrie-Logik aus mineral_formula.py erzeugt.
 
 # Berechnung durchführen
 if st.button("Mineralformel berechnen") or st.session_state.calculate:
