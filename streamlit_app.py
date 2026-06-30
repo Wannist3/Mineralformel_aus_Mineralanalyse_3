@@ -4,10 +4,12 @@ import numpy as np
 
 # Titel der App
 st.title("Mineralformel-Rechner")
-st.markdown("""
+st.markdown(
+    """
 Diese App berechnet Mineralformeln aus chemischen Analysen (Gewichtsprozent der Oxide).
 Wählen Sie eine Mineralgruppe aus und klicken Sie auf **"Beispieldaten anzeigen und berechnen"**, um typische Werte zu laden.
-""")
+    """
+)
 
 # --- Definitionen ---
 molar_masses = {
@@ -21,7 +23,8 @@ molar_masses = {
 
 elements_per_oxide = {
     "SiO2": {"Si": 1, "O": 2}, "Al2O3": {"Al": 2, "O": 3},
-    "Fe2O3": {"Fe": 2, "O": 3}, "FeO": {"Fe": 1, "O": 1},
+    "Fe2O3": {"Fe3+": 2, "O": 3},
+    "FeO": {"Fe2+": 1, "O": 1},
     "MgO": {"Mg": 1, "O": 1}, "CaO": {"Ca": 1, "O": 1},
     "Na2O": {"Na": 2, "O": 1}, "K2O": {"K": 2, "O": 1},
     "TiO2": {"Ti": 1, "O": 2}, "MnO": {"Mn": 1, "O": 1},
@@ -29,7 +32,8 @@ elements_per_oxide = {
     "ZnO": {"Zn": 1, "O": 1}, "Li2O": {"Li": 2, "O": 1},
     "H2O": {"H": 2, "O": 1}, "F": {"F": 1}, "Cl": {"Cl": 1},
     "Ce2O3": {"Ce": 2, "O": 3}, "La2O3": {"La": 2, "O": 3},
-    "Y2O3": {"Y": 2, "O": 3}, "Mn2O3": {"Mn": 2, "O": 3}
+    "Y2O3": {"Y": 2, "O": 3},
+    "Mn2O3": {"Mn": 2, "O": 3}
 }
 
 default_oxides = {
@@ -76,16 +80,98 @@ example_data = {
 }
 
 # --- Streamlit UI ---
+def normalize_oxide_name(value):
+    return str(value).strip().lower().replace(" ", "").replace("_", "").replace("-", "")
+
+
+def parse_uploaded_oxide_data(uploaded_file, mineral_group):
+    if uploaded_file is None:
+        return None
+
+    if not uploaded_file.name.lower().endswith(".csv"):
+        st.error("❌ Bitte eine CSV-Datei hochladen.")
+        return None
+
+    try:
+        df = pd.read_csv(uploaded_file)
+    except Exception as exc:
+        st.error(f"❌ Die Datei konnte nicht gelesen werden: {exc}")
+        return None
+
+    if df.empty:
+        st.error("❌ Die hochgeladene Datei ist leer.")
+        return None
+
+    expected_oxides = set(default_oxides[mineral_group]) | set(molar_masses.keys())
+    normalized_oxide_map = {normalize_oxide_name(oxide): oxide for oxide in expected_oxides}
+
+    if df.shape[0] >= 1:
+        first_row = df.iloc[0]
+        parsed_values = {}
+        for column in df.columns:
+            normalized_name = normalize_oxide_name(column)
+            if normalized_name in normalized_oxide_map and pd.api.types.is_numeric_dtype(df[column]):
+                parsed_values[normalized_oxide_map[normalized_name]] = float(first_row[column])
+        if parsed_values:
+            return parsed_values
+
+    if df.shape[1] >= 2:
+        for oxide_column in df.columns:
+            if normalize_oxide_name(oxide_column) in {"oxide", "oxides", "compound", "component", "komponente"}:
+                for value_column in df.columns:
+                    if value_column != oxide_column and pd.api.types.is_numeric_dtype(df[value_column]):
+                        parsed_values = {}
+                        for _, row in df.iterrows():
+                            oxide_name = str(row[oxide_column]).strip()
+                            normalized_name = normalize_oxide_name(oxide_name)
+                            if normalized_name in normalized_oxide_map:
+                                parsed_values[normalized_oxide_map[normalized_name]] = float(row[value_column])
+                        if parsed_values:
+                            return parsed_values
+
+    st.error("❌ Die CSV-Datei konnte nicht erkannt werden. Bitte eine Datei mit Oxidspalten oder zwei Spalten (Oxid + Wert) verwenden.")
+    return None
+
+
 mineral_group = st.sidebar.selectbox(
     "Mineralgruppe auswählen",
     list(default_oxides.keys())
 )
 
 # Session State initialisieren
-if 'oxide_values' not in st.session_state:
-    st.session_state.oxide_values = {oxide: 0.0 for oxide in default_oxides[mineral_group]}
+if 'oxide_values' not in st.session_state or not isinstance(st.session_state.oxide_values, dict):
+    st.session_state.oxide_values = {}
+for oxide in default_oxides[mineral_group]:
+    st.session_state.oxide_values.setdefault(oxide, 0.0)
 if 'calculate' not in st.session_state:
     st.session_state.calculate = False
+if 'uploaded_values' not in st.session_state:
+    st.session_state.uploaded_values = {}
+if 'uploaded_file_name' not in st.session_state:
+    st.session_state.uploaded_file_name = None
+
+uploaded_file = st.sidebar.file_uploader(
+    "Eigene Daten hochladen (.csv)",
+    type=["csv"],
+    help="Erwartet eine CSV-Datei mit Oxidspalten wie SiO2, MgO, FeO oder zwei Spalten: Oxid und Wert."
+)
+
+if uploaded_file is not None and st.session_state.uploaded_file_name != uploaded_file.name:
+    parsed_values = parse_uploaded_oxide_data(uploaded_file, mineral_group)
+    if parsed_values is not None:
+        st.session_state.uploaded_values = parsed_values
+        for oxide in default_oxides[mineral_group]:
+            if oxide in parsed_values:
+                st.session_state.oxide_values[oxide] = parsed_values[oxide]
+        st.session_state.calculate = True
+        st.session_state.uploaded_file_name = uploaded_file.name
+        st.success(f"✅ Daten aus '{uploaded_file.name}' übernommen.")
+        st.rerun()
+    else:
+        st.session_state.uploaded_file_name = None
+
+if st.session_state.uploaded_file_name:
+    st.sidebar.caption(f"Letzte Datei: {st.session_state.uploaded_file_name}")
 
 # Button zum Laden der Beispieldaten
 if st.sidebar.button("Beispieldaten anzeigen und berechnen"):
@@ -175,13 +261,23 @@ def calculate_mineral_formula(oxide_values, basis_oxygen, mineral_group):
     }
 
     # Sonderbehandlung für Pyroxene
-    if mineral_group == "Pyroxen" and "Fe" in cations:
-        total_fe = cations["Fe"]
-        fe3 = total_fe * 0.1  # Nur 10% als Fe³⁺ angenommen
-        fe2 = total_fe * 0.9  # 90% als Fe²⁺
-        del cations["Fe"]
-        cations["Fe3+"] = fe3
-        cations["Fe2+"] = fe2
+    if mineral_group == "Pyroxen":
+        total_fe_initial = cations.get("Fe2+", 0.0) + cations.get("Fe3+", 0.0)
+
+        # Remove initial Fe species from cations for re-distribution
+        if "Fe2+" in cations:
+            del cations["Fe2+"]
+        if "Fe3+" in cations:
+            del cations["Fe3+"]
+
+        if total_fe_initial > 0:
+            # Apply the 10/90 split for total iron
+            fe3_pyroxene = total_fe_initial * 0.1
+            fe2_pyroxene = total_fe_initial * 0.9
+
+            # Update cations dictionary with the new split
+            cations["Fe3+"] = fe3_pyroxene
+            cations["Fe2+"] = fe2_pyroxene
 
     return {
         "cations": cations,
