@@ -1,6 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import re
+import pdfplumber
+from io import BytesIO
 
 from mineral_formula import calculate_mineral_formula, format_mineral_formula
 
@@ -9,8 +12,8 @@ st.title("Mineralformel-Rechner")
 st.markdown(
     """
 Diese App berechnet Mineralformeln aus chemischen Analysen (Gewichtsprozent der Oxide).
-Wählen Sie eine Mineralgruppe aus und klicken Sie auf **"Beispieldaten anzeigen und berechnen"**, um typische Werte zu laden.
-    """
+Wählen Sie eine Mineralgruppe aus und laden Sie Daten als **CSV**, **Excel (XLSX)** oder **PDF** hoch.
+"""
 )
 
 # --- Definitionen ---
@@ -55,7 +58,6 @@ basis_oxygen_map = {
     "Glimmer": 11, "Feldspat": 8, "Spinell": 4, "Epidot": 12.5
 }
 
-# Mineralgruppenspezifische Element-Reihenfolgen (korrigiert)
 element_order = {
     "Olivin": ["Si", "Mg", "Fe2+", "Mn", "Ca", "Ni"],
     "Pyroxen": ["Si", "Al", "Ti", "Fe3+", "Cr", "Fe2+", "Mg", "Mn", "Ca", "Na"],
@@ -68,7 +70,6 @@ element_order = {
     "default": ["Si", "Al", "Ti", "Fe3+", "Cr", "Fe2+", "Mg", "Mn", "Ca", "Na", "K", "Ni", "Zn", "Li"]
 }
 
-# Beispiel-Datensätze
 example_data = {
     "Olivin": {"SiO2": 40.0, "MgO": 49.0, "FeO": 10.0, "MnO": 0.1, "CaO": 0.1, "NiO": 0.3},
     "Pyroxen": {"SiO2": 55.0, "Al2O3": 0.5, "TiO2": 0.1, "Fe2O3": 0.5, "FeO": 1.5, "MgO": 18.0, "MnO": 0.1, "CaO": 25.0, "Na2O": 0.2, "Cr2O3": 0.1},
@@ -81,60 +82,94 @@ example_data = {
     "Allgemein": {"SiO2": 50.0, "Al2O3": 20.0, "Fe2O3": 5.0, "FeO": 5.0, "MgO": 10.0, "CaO": 5.0, "Na2O": 3.0, "K2O": 2.0}
 }
 
-# --- Streamlit UI ---
+# --- Hilfsfunktionen ---
 def normalize_oxide_name(value):
-    return str(value).strip().lower().replace(" ", "").replace("_", "").replace("-", "")
+    """Normalisiert Oxid-Namen für Vergleich (z.B. 'SiO2', 'sio2', 'SiO-2' → 'SiO2')."""
+    value = str(value).strip().lower().replace(" ", "").replace("_", "").replace("-", "")
+    return re.sub(r'(\d+)', r'\1', value)  # Zahlen beibehalten
 
-
-def parse_uploaded_oxide_data(uploaded_file, mineral_group):
+def parse_uploaded_data(uploaded_file, mineral_group):
+    """Verarbeitet hochgeladene Dateien (CSV, XLSX, PDF) und extrahiert Oxid-Daten."""
     if uploaded_file is None:
         return None
 
-    if not uploaded_file.name.lower().endswith(".csv"):
-        st.error("❌ Bitte eine CSV-Datei hochladen.")
-        return None
+    file_type = uploaded_file.name.split('.')[-1].lower()
 
     try:
-        df = pd.read_csv(uploaded_file)
-    except Exception as exc:
-        st.error(f"❌ Die Datei konnte nicht gelesen werden: {exc}")
+        if file_type == 'csv':
+            df = pd.read_csv(uploaded_file)
+        elif file_type == 'xlsx':
+            df = pd.read_excel(uploaded_file)
+        elif file_type == 'pdf':
+            df = extract_tables_from_pdf(uploaded_file)
+            if df is None:
+                return None
+        else:
+            st.error(f"❌ Unsupported file type: {file_type}")
+            return None
+
+        if df.empty:
+            st.error("❌ Die hochgeladene Datei enthält keine Daten.")
+            return None
+
+        # Erwartete Oxide für diese Mineralgruppe
+        expected_oxides = set(default_oxides[mineral_group]) | set(molar_masses.keys())
+        normalized_oxide_map = {normalize_oxide_name(oxide): oxide for oxide in expected_oxides}
+
+        # 1. Versuch: Spalten als Oxide (z.B. erste Zeile mit SiO2, MgO, etc.)
+        if df.shape[1] > 1:
+            parsed_values = {}
+            for column in df.columns:
+                normalized_name = normalize_oxide_name(column)
+                if normalized_name in normalized_oxide_map and pd.api.types.is_numeric_dtype(df[column]):
+                    parsed_values[normalized_oxide_map[normalized_name]] = float(df[column].iloc[0])
+            if parsed_values:
+                return parsed_values
+
+        # 2. Versuch: Zwei Spalten (Oxid | Wert)
+        if df.shape[1] >= 2:
+            for oxide_col in [0, 1]:  # Prüfe beide Spalten als Oxid-Spalte
+                if df.iloc[:, oxide_col].apply(lambda x: normalize_oxide_name(x) in normalized_oxide_map).any():
+                    value_col = 1 - oxide_col  # Andere Spalte als Wert
+                    parsed_values = {}
+                    for _, row in df.iterrows():
+                        oxide = str(row.iloc[oxide_col]).strip()
+                        normalized_name = normalize_oxide_name(oxide)
+                        if normalized_name in normalized_oxide_map and pd.api.types.is_numeric_dtype(row.iloc[value_col]):
+                            parsed_values[normalized_oxide_map[normalized_name]] = float(row.iloc[value_col])
+                    if parsed_values:
+                        return parsed_values
+
+        st.error("❌ Keine gültigen Oxid-Daten in der Datei gefunden.")
         return None
 
-    if df.empty:
-        st.error("❌ Die hochgeladene Datei ist leer.")
+    except Exception as e:
+        st.error(f"❌ Fehler beim Lesen der Datei: {str(e)}")
         return None
 
-    expected_oxides = set(default_oxides[mineral_group]) | set(molar_masses.keys())
-    normalized_oxide_map = {normalize_oxide_name(oxide): oxide for oxide in expected_oxides}
+def extract_tables_from_pdf(pdf_file):
+    """Extrahiert Tabellen aus PDF-Dateien."""
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            all_tables = []
+            for page in pdf.pages:
+                tables = page.extract_tables({
+                    "vertical_strategy": "text",
+                    "horizontal_strategy": "text"
+                })
+                for table in tables:
+                    if len(table) > 1 and len(table[0]) > 1:  # Mindestens 2x2 Tabelle
+                        df = pd.DataFrame(table[1:], columns=table[0])
+                        all_tables.append(df)
+            if not all_tables:
+                st.error("❌ Keine Tabellen im PDF gefunden.")
+                return None
+            return pd.concat(all_tables, ignore_index=True)
+    except Exception as e:
+        st.error(f"❌ Fehler beim Extrahieren von Tabellen aus PDF: {str(e)}")
+        return None
 
-    if df.shape[0] >= 1:
-        first_row = df.iloc[0]
-        parsed_values = {}
-        for column in df.columns:
-            normalized_name = normalize_oxide_name(column)
-            if normalized_name in normalized_oxide_map and pd.api.types.is_numeric_dtype(df[column]):
-                parsed_values[normalized_oxide_map[normalized_name]] = float(first_row[column])
-        if parsed_values:
-            return parsed_values
-
-    if df.shape[1] >= 2:
-        for oxide_column in df.columns:
-            if normalize_oxide_name(oxide_column) in {"oxide", "oxides", "compound", "component", "komponente"}:
-                for value_column in df.columns:
-                    if value_column != oxide_column and pd.api.types.is_numeric_dtype(df[value_column]):
-                        parsed_values = {}
-                        for _, row in df.iterrows():
-                            oxide_name = str(row[oxide_column]).strip()
-                            normalized_name = normalize_oxide_name(oxide_name)
-                            if normalized_name in normalized_oxide_map:
-                                parsed_values[normalized_oxide_map[normalized_name]] = float(row[value_column])
-                        if parsed_values:
-                            return parsed_values
-
-    st.error("❌ Die CSV-Datei konnte nicht erkannt werden. Bitte eine Datei mit Oxidspalten oder zwei Spalten (Oxid + Wert) verwenden.")
-    return None
-
-
+# --- Streamlit UI ---
 mineral_group = st.sidebar.selectbox(
     "Mineralgruppe auswählen",
     list(default_oxides.keys())
@@ -152,14 +187,15 @@ if 'uploaded_values' not in st.session_state:
 if 'uploaded_file_name' not in st.session_state:
     st.session_state.uploaded_file_name = None
 
+# Datei-Upload (CSV, XLSX, PDF)
 uploaded_file = st.sidebar.file_uploader(
-    "Eigene Daten hochladen (.csv)",
-    type=["csv"],
-    help="Erwartet eine CSV-Datei mit Oxidspalten wie SiO2, MgO, FeO oder zwei Spalten: Oxid und Wert."
+    "Eigene Daten hochladen (CSV, XLSX, PDF)",
+    type=["csv", "xlsx", "pdf"],
+    help="Laden Sie eine Datei mit Oxid-Werten hoch. Erwartet Spalten wie SiO2, MgO, FeO oder zwei Spalten (Oxid | Wert)."
 )
 
 if uploaded_file is not None and st.session_state.uploaded_file_name != uploaded_file.name:
-    parsed_values = parse_uploaded_oxide_data(uploaded_file, mineral_group)
+    parsed_values = parse_uploaded_data(uploaded_file, mineral_group)
     if parsed_values is not None:
         st.session_state.uploaded_values = parsed_values
         for oxide in default_oxides[mineral_group]:
@@ -177,11 +213,9 @@ if st.session_state.uploaded_file_name:
 
 # Button zum Laden der Beispieldaten
 if st.sidebar.button("Beispieldaten anzeigen und berechnen"):
-    # Werte setzen
     example = example_data[mineral_group]
     for oxide in default_oxides[mineral_group]:
         st.session_state.oxide_values[oxide] = example.get(oxide, 0.0)
-    # Berechnung erzwingen
     st.session_state.calculate = True
     st.rerun()
 
@@ -203,8 +237,6 @@ basis_oxygen = basis_oxygen_map.get(mineral_group, 3)
 if mineral_group == "Allgemein":
     basis_oxygen = st.number_input("Basis-Sauerstoffatome", min_value=1, value=3, step=1)
 
-# Die Formelausgabe wird über die zentrale Stoichiometrie-Logik aus mineral_formula.py erzeugt.
-
 # Berechnung durchführen
 if st.button("Mineralformel berechnen") or st.session_state.calculate:
     st.session_state.calculate = False
@@ -217,7 +249,7 @@ if st.button("Mineralformel berechnen") or st.session_state.calculate:
         st.subheader("Ergebnis")
         st.markdown(f"**Mineralformel:** `{result['formula']}`")
 
-        # Tabelle aller Kationen (inkl. Spurenelemente)
+        # Tabelle aller Kationen
         cations_df = pd.DataFrame.from_dict(result["cations"], orient="index", columns=["Kationen"])
         st.dataframe(cations_df.style.format("{:.4f}"))
 
