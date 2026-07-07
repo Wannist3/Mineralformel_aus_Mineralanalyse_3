@@ -108,49 +108,172 @@ def _format_coefficient(value: float) -> str:
 
 def format_mineral_formula(cations, basis_oxygen, mineral_group):
     subscripts = str.maketrans("0123456789.", "₀₁₂₃₄₅₆₇₈₉.")
-
-    cation_order = element_order.get(mineral_group, element_order["default"])
-    visible_cations = {element: value for element, value in cations.items() if value > 0.001}
-    if not visible_cations:
-        return f"O{basis_oxygen}"
-
-    reference_element = "Si" if "Si" in visible_cations else next((element for element in cation_order if element in visible_cations), None)
-    if reference_element is None:
-        reference_element = max(visible_cations, key=visible_cations.get)
-
-    reference_value = visible_cations[reference_element]
-    normalized_cations = {
-        element: value / reference_value
-        for element, value in visible_cations.items()
-    }
-
-    ordered_elements = [element for element in cation_order if element in normalized_cations and element != reference_element]
-    ordered_elements.extend(element for element in normalized_cations if element not in ordered_elements and element != reference_element)
-    if reference_element in normalized_cations:
-        ordered_elements.append(reference_element)
-
-    formula_parts = []
-    for element in ordered_elements:
-        value = normalized_cations[element]
-        if value < 0.01:
-            continue
-        part = element.replace("2+", "²⁺").replace("3+", "³⁺")
-        coeff = _format_coefficient(value)
-        if coeff:
-            part += coeff
-        formula_parts.append(part)
-
-    oxygen_str = "O"
-    if isinstance(basis_oxygen, float):
-        if basis_oxygen.is_integer():
-            oxygen_str += str(int(basis_oxygen))
-        else:
-            oxygen_str += f"{basis_oxygen:.1f}".rstrip("0").rstrip(".").translate(subscripts)
+    
+    if mineral_group == "Granat":
+        # Granat: X₃Y₂[SiO₄]₃
+        # X-Plätze (dodecahedral): Ca, Mg, Fe2+, Mn
+        # Y-Plätze (octahedral): Al, Fe3+, Cr
+        x_elements = {e: cations.get(e, 0) for e in ["Ca", "Mg", "Fe2+", "Mn"]}
+        y_elements = {e: cations.get(e, 0) for e in ["Al", "Fe3+", "Cr"]}
+        si = cations.get("Si", 0)
+        
+        x_total = sum(x_elements.values())
+        y_total = sum(y_elements.values())
+        si_coeff = round(si / 3, 2) if si > 0 else 0
+        
+        # Normalisiere auf Si = 1
+        if si > 0:
+            factor = 1 / (si / 3)
+            x_total *= factor
+            y_total *= factor
+        
+        x_str = _format_cation_group(x_elements, subscripts)
+        y_str = _format_cation_group(y_elements, subscripts)
+        
+        x_coeff = _format_coefficient(x_total / 3) if x_total > 0 else ""
+        y_coeff = _format_coefficient(y_total / 2) if y_total > 0 else ""
+        
+        formula = f"{x_str}{x_coeff}{y_str}{y_coeff}[SiO₄]₃"
+        return formula
+    
+    elif mineral_group == "Olivin":
+        # Olivin: (Mg,Fe)₂[SiO₄]
+        cation_elements = {e: cations.get(e, 0) for e in ["Mg", "Fe2+", "Mn", "Ca", "Ni"]}
+        si = cations.get("Si", 0)
+        
+        cation_str = _format_cation_group(cation_elements, subscripts)
+        cation_coeff = _format_coefficient(2) if sum(cation_elements.values()) > 0 else ""
+        
+        formula = f"({cation_str})₂[SiO₄]"
+        return formula
+    
+    elif mineral_group == "Pyroxen":
+        # Pyroxen: (Ca,Mg,Fe)₂(Si,Al)₂O₆ oder X(Y,Z)O₃ mit X=Ca,Mg,Fe und Y,Z=Si,Al
+        x_elements = {e: cations.get(e, 0) for e in ["Ca", "Mg", "Fe2+", "Mn"]}
+        yz_elements = {e: cations.get(e, 0) for e in ["Si", "Al", "Ti"]}
+        
+        x_str = _format_cation_group(x_elements, subscripts)
+        yz_str = _format_cation_group(yz_elements, subscripts)
+        
+        formula = f"{x_str}({yz_str})O₆"
+        return formula
+    
+    elif mineral_group == "Amphibol":
+        # Amphibol: Ca₂(Mg,Fe)₅[Si₈O₂₂](OH)₂
+        ca = cations.get("Ca", 0)
+        mg_fe = {e: cations.get(e, 0) for e in ["Mg", "Fe2+", "Mn"]}
+        si = cations.get("Si", 0)
+        h = cations.get("H", 0)
+        
+        ca_coeff = _format_coefficient(ca / 2) if ca > 0 else ""
+        mg_fe_str = _format_cation_group(mg_fe, subscripts)
+        mg_fe_coeff = _format_coefficient(sum(mg_fe.values()) / 5) if sum(mg_fe.values()) > 0 else ""
+        si_coeff = _format_coefficient(si / 8) if si > 0 else ""
+        h_coeff = _format_coefficient(h / 2) if h > 0 else ""
+        
+        formula = f"Ca{ca_coeff}({mg_fe_str}){mg_fe_coeff}[Si{si_coeff}O₂₂](OH){h_coeff}"
+        return formula
+    
+    elif mineral_group == "Spinell":
+        # Spinell: (Mg,Fe)2+(Al,Fe3+,Cr)₂O₄
+        divalent = {e: cations.get(e, 0) for e in ["Mg", "Fe2+", "Zn", "Mn"]}
+        trivalent = {e: cations.get(e, 0) for e in ["Al", "Fe3+", "Cr", "Ti"]}
+        
+        div_str = _format_cation_group(divalent, subscripts)
+        triv_str = _format_cation_group(trivalent, subscripts)
+        
+        formula = f"({div_str})({triv_str})₂O₄"
+        return formula
+    
+    elif mineral_group == "Feldspat":
+        # Feldspat: (Ca,Na,K)[Si,Al]₄O₈
+        a_site = {e: cations.get(e, 0) for e in ["Ca", "Na", "K"]}
+        t_site = {e: cations.get(e, 0) for e in ["Si", "Al"]}
+        
+        a_str = _format_cation_group(a_site, subscripts)
+        t_str = _format_cation_group(t_site, subscripts)
+        
+        formula = f"({a_str})({t_str})₄O₈"
+        return formula
+    
+    elif mineral_group == "Glimmer":
+        # Glimmer: K(Al,Mg,Fe)₂[AlSi₃O₁₀](OH,F)₂
+        k = cations.get("K", 0)
+        oct = {e: cations.get(e, 0) for e in ["Al", "Mg", "Fe2+", "Li", "Mn"]}
+        si = cations.get("Si", 0)
+        oh_f = cations.get("H", 0) + cations.get("F", 0) + cations.get("Cl", 0)
+        
+        k_coeff = _format_coefficient(k)
+        oct_str = _format_cation_group(oct, subscripts)
+        oct_coeff = _format_coefficient(sum(oct.values()) / 2) if sum(oct.values()) > 0 else ""
+        si_coeff = _format_coefficient(si / 3) if si > 0 else ""
+        oh_f_coeff = _format_coefficient(oh_f / 2) if oh_f > 0 else ""
+        
+        formula = f"K{k_coeff}({oct_str}){oct_coeff}[AlSi{si_coeff}O₁₀](OH,F){oh_f_coeff}"
+        return formula
+    
+    elif mineral_group == "Epidot":
+        # Epidot: Ca₂(Al,Fe3+)₃[SiO₄][Si₂O₇](OH)
+        ca = cations.get("Ca", 0)
+        al_fe = {e: cations.get(e, 0) for e in ["Al", "Fe3+", "Mn"]}
+        
+        ca_coeff = _format_coefficient(ca / 2) if ca > 0 else ""
+        al_fe_str = _format_cation_group(al_fe, subscripts)
+        al_fe_coeff = _format_coefficient(sum(al_fe.values()) / 3) if sum(al_fe.values()) > 0 else ""
+        
+        formula = f"Ca{ca_coeff}({al_fe_str}){al_fe_coeff}[SiO₄][Si₂O₇](OH)"
+        return formula
+    
     else:
-        oxygen_str += str(basis_oxygen)
+        # Allgemein oder unbekannt - einfache Darstellung
+        cation_order = element_order.get(mineral_group, element_order["default"])
+        visible_cations = {element: value for element, value in cations.items() if value > 0.001}
+        if not visible_cations:
+            oxygen_str = "O"
+            if isinstance(basis_oxygen, float):
+                if basis_oxygen.is_integer():
+                    oxygen_str += str(int(basis_oxygen)).translate(subscripts)
+                else:
+                    oxygen_str += f"{basis_oxygen:.1f}".rstrip("0").rstrip(".").translate(subscripts)
+            else:
+                oxygen_str += str(basis_oxygen).translate(subscripts)
+            return oxygen_str
+        
+        ordered_elements = [element for element in cation_order if element in visible_cations]
+        ordered_elements.extend(element for element in visible_cations if element not in ordered_elements)
+        
+        formula_parts = []
+        for element in ordered_elements:
+            value = visible_cations[element]
+            if value < 0.01:
+                continue
+            part = element.replace("2+", "²⁺").replace("3+", "³⁺")
+            coeff = _format_coefficient(value)
+            if coeff:
+                part += coeff
+            formula_parts.append(part)
+        
+        oxygen_str = "O"
+        if isinstance(basis_oxygen, float):
+            if basis_oxygen.is_integer():
+                oxygen_str += str(int(basis_oxygen)).translate(subscripts)
+            else:
+                oxygen_str += f"{basis_oxygen:.1f}".rstrip("0").rstrip(".").translate(subscripts)
+        else:
+            oxygen_str += str(basis_oxygen).translate(subscripts)
+        
+        formula_parts.append(oxygen_str)
+        return "".join(formula_parts)
 
-    formula_parts.append(oxygen_str)
-    return "".join(formula_parts)
+
+def _format_cation_group(elements, subscripts):
+    """Formatiert eine Gruppe von Kationen für die strukturelle Formel."""
+    parts = []
+    for element, value in elements.items():
+        if value > 0.01:
+            el_str = element.replace("2+", "²⁺").replace("3+", "³⁺")
+            parts.append(el_str)
+    return ",".join(parts)
 
 
 def calculate_mineral_formula(oxide_values, basis_oxygen, mineral_group):
