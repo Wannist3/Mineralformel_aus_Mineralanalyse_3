@@ -2,9 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
-import pdfplumber
-from io import BytesIO
-
+import PyPDF2
 from mineral_formula import calculate_mineral_formula, format_mineral_formula
 
 # Titel der App
@@ -12,7 +10,7 @@ st.title("Mineralformel-Rechner")
 st.markdown(
     """
 Diese App berechnet Mineralformeln aus chemischen Analysen (Gewichtsprozent der Oxide).
-Wählen Sie eine Mineralgruppe aus und laden Sie Daten als **CSV**, **Excel (XLSX)** oder **PDF** hoch.
+Wählen Sie eine Mineralgruppe aus und laden Sie Ihre Daten im passenden Format hoch.
 """
 )
 
@@ -28,8 +26,7 @@ molar_masses = {
 
 elements_per_oxide = {
     "SiO2": {"Si": 1, "O": 2}, "Al2O3": {"Al": 2, "O": 3},
-    "Fe2O3": {"Fe3+": 2, "O": 3},
-    "FeO": {"Fe2+": 1, "O": 1},
+    "Fe2O3": {"Fe3+": 2, "O": 3}, "FeO": {"Fe2+": 1, "O": 1},
     "MgO": {"Mg": 1, "O": 1}, "CaO": {"Ca": 1, "O": 1},
     "Na2O": {"Na": 2, "O": 1}, "K2O": {"K": 2, "O": 1},
     "TiO2": {"Ti": 1, "O": 2}, "MnO": {"Mn": 1, "O": 1},
@@ -37,8 +34,7 @@ elements_per_oxide = {
     "ZnO": {"Zn": 1, "O": 1}, "Li2O": {"Li": 2, "O": 1},
     "H2O": {"H": 2, "O": 1}, "F": {"F": 1}, "Cl": {"Cl": 1},
     "Ce2O3": {"Ce": 2, "O": 3}, "La2O3": {"La": 2, "O": 3},
-    "Y2O3": {"Y": 2, "O": 3},
-    "Mn2O3": {"Mn": 2, "O": 3}
+    "Y2O3": {"Y": 2, "O": 3}, "Mn2O3": {"Mn": 2, "O": 3}
 }
 
 default_oxides = {
@@ -86,7 +82,33 @@ example_data = {
 def normalize_oxide_name(value):
     """Normalisiert Oxid-Namen für Vergleich (z.B. 'SiO2', 'sio2', 'SiO-2' → 'SiO2')."""
     value = str(value).strip().lower().replace(" ", "").replace("_", "").replace("-", "")
-    return re.sub(r'(\d+)', r'\1', value)  # Zahlen beibehalten
+    return re.sub(r'(\d+)', r'\1', value)
+
+def extract_text_from_pdf(pdf_file):
+    """Extrahiert Text aus einer PDF-Datei mit PyPDF2."""
+    try:
+        reader = PyPDF2.PdfReader(pdf_file)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text()
+        return text if text.strip() else None
+    except Exception as e:
+        st.error(f"❌ Fehler beim Lesen der PDF: {str(e)}")
+        return None
+
+def parse_pdf_text(text, mineral_group):
+    """Sucht nach Oxid-Werten im extrahierten PDF-Text."""
+    expected_oxides = set(default_oxides[mineral_group]) | set(molar_masses.keys())
+    parsed_values = {}
+
+    for oxide in expected_oxides:
+        # Suche nach Mustern wie "SiO2 40.5" oder "SiO2: 40.5"
+        pattern = re.compile(rf"{oxide}\s*[:=]?\s*(\d+\.?\d*)", re.IGNORECASE)
+        match = pattern.search(text)
+        if match:
+            parsed_values[oxide] = float(match.group(1))
+
+    return parsed_values if parsed_values else None
 
 def parse_uploaded_data(uploaded_file, mineral_group):
     """Verarbeitet hochgeladene Dateien (CSV, XLSX, PDF) und extrahiert Oxid-Daten."""
@@ -101,11 +123,14 @@ def parse_uploaded_data(uploaded_file, mineral_group):
         elif file_type == 'xlsx':
             df = pd.read_excel(uploaded_file)
         elif file_type == 'pdf':
-            df = extract_tables_from_pdf(uploaded_file)
-            if df is None:
+            text = extract_text_from_pdf(uploaded_file)
+            if text:
+                return parse_pdf_text(text, mineral_group)
+            else:
+                st.error("❌ Kein Text in der PDF gefunden oder die PDF enthält keine maschinenlesbaren Daten.")
                 return None
         else:
-            st.error(f"❌ Unsupported file type: {file_type}")
+            st.error(f"❌ Ununterstützter Dateityp: {file_type}")
             return None
 
         if df.empty:
@@ -129,7 +154,7 @@ def parse_uploaded_data(uploaded_file, mineral_group):
         # 2. Versuch: Zwei Spalten (Oxid | Wert)
         if df.shape[1] >= 2:
             for oxide_col in [0, 1]:  # Prüfe beide Spalten als Oxid-Spalte
-                if df.iloc[:, oxide_col].apply(lambda x: normalize_oxide_name(x) in normalized_oxide_map).any():
+                if df.iloc[:, oxide_col].apply(lambda x: normalize_oxide_name(str(x)) in normalized_oxide_map).any():
                     value_col = 1 - oxide_col  # Andere Spalte als Wert
                     parsed_values = {}
                     for _, row in df.iterrows():
@@ -140,33 +165,11 @@ def parse_uploaded_data(uploaded_file, mineral_group):
                     if parsed_values:
                         return parsed_values
 
-        st.error("❌ Keine gültigen Oxid-Daten in der Datei gefunden.")
+        st.error("❌ Keine gültigen Oxid-Daten in der Datei gefunden. Bitte überprüfen Sie das Format.")
         return None
 
     except Exception as e:
         st.error(f"❌ Fehler beim Lesen der Datei: {str(e)}")
-        return None
-
-def extract_tables_from_pdf(pdf_file):
-    """Extrahiert Tabellen aus PDF-Dateien."""
-    try:
-        with pdfplumber.open(pdf_file) as pdf:
-            all_tables = []
-            for page in pdf.pages:
-                tables = page.extract_tables({
-                    "vertical_strategy": "text",
-                    "horizontal_strategy": "text"
-                })
-                for table in tables:
-                    if len(table) > 1 and len(table[0]) > 1:  # Mindestens 2x2 Tabelle
-                        df = pd.DataFrame(table[1:], columns=table[0])
-                        all_tables.append(df)
-            if not all_tables:
-                st.error("❌ Keine Tabellen im PDF gefunden.")
-                return None
-            return pd.concat(all_tables, ignore_index=True)
-    except Exception as e:
-        st.error(f"❌ Fehler beim Extrahieren von Tabellen aus PDF: {str(e)}")
         return None
 
 # --- Streamlit UI ---
@@ -176,10 +179,8 @@ mineral_group = st.sidebar.selectbox(
 )
 
 # Session State initialisieren
-if 'oxide_values' not in st.session_state or not isinstance(st.session_state.oxide_values, dict):
-    st.session_state.oxide_values = {}
-for oxide in default_oxides[mineral_group]:
-    st.session_state.oxide_values.setdefault(oxide, 0.0)
+if 'oxide_values' not in st.session_state:
+    st.session_state.oxide_values = {oxide: 0.0 for oxide in default_oxides[mineral_group]}
 if 'calculate' not in st.session_state:
     st.session_state.calculate = False
 if 'uploaded_values' not in st.session_state:
@@ -187,13 +188,71 @@ if 'uploaded_values' not in st.session_state:
 if 'uploaded_file_name' not in st.session_state:
     st.session_state.uploaded_file_name = None
 
-# Datei-Upload (CSV, XLSX, PDF)
+# Datei-Upload mit ausführlichen Format-Hinweisen
+st.sidebar.markdown("### 📁 Eigene Daten hochladen")
+
+# Aufklappbare Hilfe-Box mit Format-Informationen
+with st.sidebar.expander("ℹ️ Format-Hinweise anzeigen"):
+    st.markdown("""
+    **Unterstützte Dateiformate und Beispiele**:
+
+    1. **CSV / Excel (XLSX)**
+       - **Format 1**: Spalten mit Oxid-Namen (pro Zeile ein Datensatz)
+         ```csv
+         SiO2, Al2O3, FeO, MgO
+         40.5,  12.3, 15.2, 8.1
+         ```
+       - **Format 2**: Zwei Spalten (Oxid | Wert)
+         ```csv
+         Oxid,   Wert
+         SiO2,   40.5
+         Al2O3,  12.3
+         FeO,    15.2
+         ```
+
+    2. **PDF** *(nur Text-Extraktion, keine Tabellen!)*
+       - Der Text muss Oxid-Werte im Format enthalten:
+         ```
+         SiO2 40.5
+         Al2O3: 12.3
+         FeO = 15.2
+         MgO 8.1
+         ```
+       - ❗ **Wichtig**: Die PDF muss **maschinenlesbaren Text** enthalten
+         (keine gescannten Bilder oder Tabellen ohne Textlayer).
+
+    **Beispiel-Downloads**:
+    - [CSV-Vorlage herunterladen](https://example.com/template.csv)
+    - [Excel-Vorlage herunterladen](https://example.com/template.xlsx)
+    """)
+
+# Datei-Uploader
 uploaded_file = st.sidebar.file_uploader(
-    "Eigene Daten hochladen (CSV, XLSX, PDF)",
+    "Datei auswählen (CSV, XLSX, PDF)",
     type=["csv", "xlsx", "pdf"],
-    help="Laden Sie eine Datei mit Oxid-Werten hoch. Erwartet Spalten wie SiO2, MgO, FeO oder zwei Spalten (Oxid | Wert)."
+    help="Klicken Sie oben auf 'ℹ️ Format-Hinweise anzeigen' für Details zu den erwarteten Formaten."
 )
 
+# Dynamische Hinweise nach Upload
+if uploaded_file:
+    file_type = uploaded_file.name.split('.')[-1].lower()
+    if file_type == 'pdf':
+        st.sidebar.warning(
+            "⚠️ **Hinweis zu PDFs**: \n"
+            "Die App extrahiert nur **Text** (nicht Tabellen). \n"
+            "Stellen Sie sicher, dass Ihre PDF Werte wie folgt enthält:\n"
+            "`SiO2 40.5` oder `Al2O3: 12.3`\n\n"
+            "Falls Ihre PDF eine Tabelle enthält, nutzen Sie stattdessen CSV/Excel."
+        )
+    else:
+        st.sidebar.success(
+            f"✅ {file_type.upper()}-Datei erfolgreich hochgeladen.\n"
+            "Erwartetes Format: "
+            "**Spalten mit Oxid-Namen** (z.B. `SiO2`, `Al2O3`) oder "
+            "**zwei Spalten** (`Oxid` | `Wert`)."
+        )
+
+# Dateiverarbeitung
 if uploaded_file is not None and st.session_state.uploaded_file_name != uploaded_file.name:
     parsed_values = parse_uploaded_data(uploaded_file, mineral_group)
     if parsed_values is not None:
@@ -203,16 +262,16 @@ if uploaded_file is not None and st.session_state.uploaded_file_name != uploaded
                 st.session_state.oxide_values[oxide] = parsed_values[oxide]
         st.session_state.calculate = True
         st.session_state.uploaded_file_name = uploaded_file.name
-        st.success(f"✅ Daten aus '{uploaded_file.name}' übernommen.")
+        st.success(f"✅ Daten aus '{uploaded_file.name}' erfolgreich übernommen.")
         st.rerun()
     else:
         st.session_state.uploaded_file_name = None
 
 if st.session_state.uploaded_file_name:
-    st.sidebar.caption(f"Letzte Datei: {st.session_state.uploaded_file_name}")
+    st.sidebar.caption(f"📄 Letzte Datei: {st.session_state.uploaded_file_name}")
 
 # Button zum Laden der Beispieldaten
-if st.sidebar.button("Beispieldaten anzeigen und berechnen"):
+if st.sidebar.button("🔄 Beispieldaten laden"):
     example = example_data[mineral_group]
     for oxide in default_oxides[mineral_group]:
         st.session_state.oxide_values[oxide] = example.get(oxide, 0.0)
@@ -235,26 +294,35 @@ with st.container():
 # Basis-Sauerstoffatome
 basis_oxygen = basis_oxygen_map.get(mineral_group, 3)
 if mineral_group == "Allgemein":
-    basis_oxygen = st.number_input("Basis-Sauerstoffatome", min_value=1, value=3, step=1)
+    basis_oxygen = st.number_input(
+        "Basis-Sauerstoffatome",
+        min_value=1,
+        value=3,
+        step=1,
+        help="Anzahl der Sauerstoffatome, auf die normalisiert wird (z.B. 4 für Olivin, 8 für Feldspat)."
+    )
 
 # Berechnung durchführen
-if st.button("Mineralformel berechnen") or st.session_state.calculate:
+if st.button("🔢 Mineralformel berechnen") or st.session_state.calculate:
     st.session_state.calculate = False
     oxide_values = {oxide: st.session_state.oxide_values[oxide] for oxide in default_oxides[mineral_group]}
 
     total_weight = sum(oxide_values.values())
-    result = calculate_mineral_formula(oxide_values, basis_oxygen, mineral_group)
-
-    if result:
-        st.subheader("Ergebnis")
-        st.markdown(f"**Mineralformel:** `{result['formula']}`")
-
-        # Tabelle aller Kationen
-        cations_df = pd.DataFrame.from_dict(result["cations"], orient="index", columns=["Kationen"])
-        st.dataframe(cations_df.style.format("{:.4f}"))
-
-        st.markdown(f"**Summe der Kationen:** {result['total_cations']:.4f}")
-        st.markdown(f"**Normalisierungsfaktor:** {result['normalization_factor']:.4f}")
-        st.markdown(f"**Summe der Oxide:** {total_weight:.2f}%")
+    if total_weight == 0:
+        st.warning("⚠️ Alle Werte sind 0. Bitte geben Sie gültige Daten ein.")
     else:
-        st.error("❌ Berechnung fehlgeschlagen. Bitte Eingaben prüfen.")
+        result = calculate_mineral_formula(oxide_values, basis_oxygen, mineral_group)
+
+        if result:
+            st.subheader("Ergebnis")
+            st.markdown(f"**Mineralformel:** `{result['formula']}`")
+
+            # Tabelle aller Kationen
+            cations_df = pd.DataFrame.from_dict(result["cations"], orient="index", columns=["Kationen"])
+            st.dataframe(cations_df.style.format("{:.4f}"))
+
+            st.markdown(f"**Summe der Kationen:** {result['total_cations']:.4f}")
+            st.markdown(f"**Normalisierungsfaktor:** {result['normalization_factor']:.4f}")
+            st.markdown(f"**Summe der Oxide:** {total_weight:.2f}%")
+        else:
+            st.error("❌ Berechnung fehlgeschlagen. Bitte überprüfen Sie Ihre Eingaben.")
