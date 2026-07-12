@@ -1,5 +1,35 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+
+def find_data_file(filename: str, search_dirs=None) -> Path | None:
+    """Suche nach einer Daten-Datei im aktuellen Arbeitsverzeichnis oder bekannten Ordnern."""
+    if search_dirs is None:
+        search_dirs = [Path.cwd(), Path(__file__).resolve().parent, Path("/content")]
+
+    candidates = []
+    for base_dir in search_dirs:
+        if base_dir is None:
+            continue
+        path = Path(base_dir)
+        if not path.exists():
+            continue
+        if path.is_file():
+            candidates.append(path)
+            continue
+
+        direct_path = path / filename
+        if direct_path.exists():
+            return direct_path
+
+        for match in path.rglob(filename):
+            if match.is_file():
+                return match
+
+    return None
+
+
 molar_masses = {
     "SiO2": 60.084,
     "Al2O3": 101.96,
@@ -137,15 +167,23 @@ def format_mineral_formula(cations, basis_oxygen, mineral_group):
         return formula
     
     elif mineral_group == "Olivin":
-        # Olivin: (Mg,Fe)₂[SiO₄]
+        # Olivin: Mg₁.₈₃Fe²⁺₀.₂₁SiO4
         cation_elements = {e: cations.get(e, 0) for e in ["Mg", "Fe2+", "Mn", "Ca", "Ni"]}
         si = cations.get("Si", 0)
-        
-        cation_str = _format_cation_group(cation_elements, subscripts)
-        cation_coeff = _format_coefficient(2) if sum(cation_elements.values()) > 0 else ""
-        
-        formula = f"({cation_str})₂[SiO₄]"
-        return formula
+
+        if si > 0:
+            parts = []
+            for element in ["Mg", "Fe2+", "Mn", "Ca", "Ni"]:
+                value = cation_elements.get(element, 0)
+                if value > 0.01:
+                    coeff = _format_coefficient(value / si)
+                    if coeff:
+                        parts.append(f"{element.replace('2+', '²⁺')}{coeff}")
+                    else:
+                        parts.append(element.replace("2+", "²⁺"))
+            return "".join(parts) + "SiO4"
+
+        return "SiO4"
     
     elif mineral_group == "Pyroxen":
         # Pyroxen: (Ca,Mg,Fe)₂(Si,Al)₂O₆ oder X(Y,Z)O₃ mit X=Ca,Mg,Fe und Y,Z=Si,Al

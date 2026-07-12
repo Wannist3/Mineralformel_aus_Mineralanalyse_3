@@ -1,12 +1,133 @@
+
+# The content of cell zyApWimM3kEa will be saved into app.py
+from pathlib import Path
+
 import streamlit as st
 import pandas as pd
 import re
 import PyPDF2
 import pdfplumber
-import mag4 # Importieren Sie das mag4 Paket
+# import mag4 # 'mag4' was imported but not used in the provided code, consider removing if not needed.
 
 # Ihre benutzerdefinierte Logik für Mineralformeln
-from mineral_formula import calculate_mineral_formula, format_mineral_formula, default_oxides, molar_masses, elements_per_oxide, basis_oxygen_map, element_order, example_data
+# We will explicitly import what's needed from mineral_formula.py, but not default_oxides or example_data
+from mineral_formula import (
+    calculate_mineral_formula,
+    format_mineral_formula,
+    molar_masses,
+    elements_per_oxide,
+    basis_oxygen_map,
+    element_order,
+    find_data_file,
+)
+
+# --- Load and process MRMinerals.csv for mineral identification ---
+try:
+    csv_path = find_data_file('MRMinerals.csv', search_dirs=[Path.cwd(), Path(__file__).resolve().parent, Path('/content')])
+    if csv_path is None:
+        raise FileNotFoundError("MRMinerals.csv")
+
+    df_minerals_data = pd.read_csv(csv_path)
+    # Flexible handling: accept alternative column names for the mineral group
+    import ast
+
+    # Find a suitable group column if 'Mineralgruppe' is missing
+    if 'Mineralgruppe' not in df_minerals_data.columns:
+        group_col = None
+        for col in df_minerals_data.columns:
+            if col.strip().lower() in ('mineralgruppe', 'group', 'subgroup', 'mineral name', 'mineralname'):
+                group_col = col
+                break
+        if group_col:
+            df_minerals_data = df_minerals_data.rename(columns={group_col: 'Mineralgruppe'})
+
+    # If oxide values are provided as a dict-string in a single column (e.g. 'Oxide wt%' or 'Elemental wt%'),
+    # try to expand them into separate columns so the rest of the app can process them.
+    oxide_dict_col = None
+    for col in df_minerals_data.columns:
+        lower = col.strip().lower()
+        if 'oxide' in lower and ('wt' in lower or '%' in lower):
+            oxide_dict_col = col
+            break
+        if 'elemental' in lower and ('wt' in lower or '%' in lower):
+            oxide_dict_col = col
+            break
+
+    if oxide_dict_col:
+        def _parse_dict_cell(cell):
+            if pd.isna(cell):
+                return {}
+            if isinstance(cell, dict):
+                return cell
+            try:
+                return ast.literal_eval(cell)
+            except Exception:
+                return {}
+
+        parsed = df_minerals_data[oxide_dict_col].apply(_parse_dict_cell)
+        # Determine all keys used in the dicts
+        all_keys = set()
+        for d in parsed:
+            if isinstance(d, dict):
+                all_keys.update(d.keys())
+
+        # Add each key as a separate column (fill missing with 0)
+        for key in sorted(all_keys):
+            try:
+                df_minerals_data[key] = parsed.apply(lambda d: float(d.get(key, 0)) if isinstance(d, dict) else 0.0)
+            except Exception:
+                df_minerals_data[key] = 0.0
+    # Assuming 'Mineralgruppe' is the column that defines the mineral group
+    if 'Mineralgruppe' not in df_minerals_data.columns:
+        st.error("❌ Die Datei 'MRMinerals.csv' muss eine Spalte 'Mineralgruppe' enthalten.")
+        st.stop()
+
+    MINERAL_GROUPS = sorted(df_minerals_data['Mineralgruppe'].unique().tolist())
+    DEFAULT_OXIDES_MAP = {}
+    EXAMPLE_DATA_MAP = {}
+
+    for group in MINERAL_GROUPS:
+        group_df = df_minerals_data[df_minerals_data['Mineralgruppe'] == group]
+        # Identify oxide columns - assume all columns except 'Mineralgruppe' are oxides
+        # Exclude other non-oxide columns if any are identified
+        oxide_columns = [col for col in group_df.columns if col != 'Mineralgruppe']
+
+        # Filter out columns that are not in molar_masses (i.e., not recognized oxides)
+        # This makes sure we only consider valid oxides for calculations
+        valid_oxides_for_group = [oxide for oxide in oxide_columns if oxide in molar_masses]
+
+        if not valid_oxides_for_group:
+            st.warning(f"⚠️ Keine gültigen Oxid-Spalten für Mineralgruppe '{group}' in 'MRMinerals.csv' gefunden. Diese Gruppe wird ignoriert.")
+            continue
+
+        # Sort oxides for consistent display, using element_order if available
+        DEFAULT_OXIDES_MAP[group] = sorted(valid_oxides_for_group, key=lambda x: element_order.get(x, 999))
+
+        # Get example data (first row for this group)
+        example_row = group_df[valid_oxides_for_group].iloc[0]
+        EXAMPLE_DATA_MAP[group] = example_row.fillna(0).to_dict() # Fill NaN with 0 for example data
+
+    # If no mineral groups with valid oxides were found after processing the CSV
+    if not DEFAULT_OXIDES_MAP:
+        st.error("❌ Keine Mineralgruppen in 'MRMinerals.csv' gefunden oder keine gültigen Oxide zugeordnet. Bitte überprüfen Sie die Datei.")
+        st.stop()
+
+    # Add a general option if it's missing and if the original app supported it
+    if "Allgemein" not in MINERAL_GROUPS:
+        MINERAL_GROUPS.append("Allgemein")
+        # For 'Allgemein', list all known oxides from molar_masses
+        DEFAULT_OXIDES_MAP["Allgemein"] = sorted(list(molar_masses.keys()), key=lambda x: element_order.get(x, 999))
+        EXAMPLE_DATA_MAP["Allgemein"] = {oxide: 0.0 for oxide in DEFAULT_OXIDES_MAP["Allgemein"]}
+
+    # Re-sort MINERAL_GROUPS to ensure 'Allgemein' is included and sorted alphabetically
+    MINERAL_GROUPS = sorted(list(DEFAULT_OXIDES_MAP.keys()))
+
+except FileNotFoundError:
+    st.error("❌ Die Datei 'MRMinerals.csv' wurde nicht gefunden. Bitte stellen Sie sicher, dass sie im Verzeichnis '/content/' liegt.")
+    st.stop()
+except Exception as e:
+    st.error(f"❌ Fehler beim Laden oder Verarbeiten von 'MRMinerals.csv': {str(e)}")
+    st.stop()
 
 # Titel der App
 st.title("Mineralformel-Rechner")
@@ -17,7 +138,7 @@ Wählen Sie eine Mineralgruppe aus und laden Sie Ihre Daten im passenden Format 
 """
 )
 
-# --- Hilfsfunktionen für Dateiverarbeitung (wie zuvor) ---
+# --- Hilfsfunktionen für Dateiverarbeitung ---
 def normalize_oxide_name(value):
     """Normalisiert Oxid-Namen für Vergleich."""
     value = str(value).strip().lower().replace(" ", "").replace("_", "").replace("-", "")
@@ -54,7 +175,10 @@ def extract_tables_from_pdf(pdf_file):
 
 def parse_pdf_text(text, mineral_group):
     """Sucht nach Oxid-Werten im extrahierten PDF-Text."""
-    expected_oxides = set(default_oxides[mineral_group]) | set(molar_masses.keys())
+    # Use DEFAULT_OXIDES_MAP here
+    expected_oxides_for_group = DEFAULT_OXIDES_MAP.get(mineral_group, [])
+    # Combine with all known molar_masses keys to recognize any valid oxide, even if not explicitly in the current group's DEFAULT_OXIDES_MAP
+    expected_oxides = set(expected_oxides_for_group) | set(molar_masses.keys())
     parsed_values = {}
 
     for oxide in expected_oxides:
@@ -65,12 +189,13 @@ def parse_pdf_text(text, mineral_group):
                 parsed_values[oxide] = float(match.group(1))
             except ValueError:
                 continue
-
     return parsed_values if parsed_values else None
 
 def parse_pdf_tables(tables, mineral_group):
     """Verarbeitet extrahierte Tabellen aus PDF-Dateien."""
-    expected_oxides = set(default_oxides[mineral_group]) | set(molar_masses.keys())
+    # Use DEFAULT_OXIDES_MAP here
+    expected_oxides_for_group = DEFAULT_OXIDES_MAP.get(mineral_group, [])
+    expected_oxides = set(expected_oxides_for_group) | set(molar_masses.keys())
     normalized_oxide_map = {normalize_oxide_name(oxide): oxide for oxide in expected_oxides}
 
     for table in tables:
@@ -157,7 +282,9 @@ def parse_uploaded_data(uploaded_file, mineral_group):
             st.error("❌ Die hochgeladene Datei enthält keine Daten.")
             return None
 
-        expected_oxides = set(default_oxides[mineral_group]) | set(molar_masses.keys())
+        # Use DEFAULT_OXIDES_MAP here
+        expected_oxides_for_group = DEFAULT_OXIDES_MAP.get(mineral_group, [])
+        expected_oxides = set(expected_oxides_for_group) | set(molar_masses.keys())
         normalized_oxide_map = {normalize_oxide_name(oxide): oxide for oxide in expected_oxides}
 
         # Spalten als Oxide
@@ -204,18 +331,29 @@ def parse_uploaded_data(uploaded_file, mineral_group):
 # --- Streamlit UI ---
 mineral_group = st.sidebar.selectbox(
     "Mineralgruppe auswählen",
-    list(default_oxides.keys())
+    MINERAL_GROUPS # Use MINERAL_GROUPS from CSV
 )
 
-# Session State initialisieren
+# Session State initialisieren und bei Mineralgruppenwechsel zurücksetzen
+if 'current_mineral_group' not in st.session_state or st.session_state.current_mineral_group != mineral_group:
+    st.session_state.current_mineral_group = mineral_group
+    # Reset oxide_values based on the newly selected mineral_group
+    st.session_state.oxide_values = {oxide: 0.0 for oxide in DEFAULT_OXIDES_MAP.get(mineral_group, [])}
+    # Also reset uploaded and calculated states when mineral group changes
+    st.session_state.uploaded_values = {}
+    st.session_state.uploaded_file_name = None
+    st.session_state.calculate = False
+
+# Fallback for initial state if not covered by the above logic (e.g., first load)
 if 'oxide_values' not in st.session_state:
-    st.session_state.oxide_values = {oxide: 0.0 for oxide in default_oxides[mineral_group]}
+    st.session_state.oxide_values = {oxide: 0.0 for oxide in DEFAULT_OXIDES_MAP.get(mineral_group, [])}
 if 'calculate' not in st.session_state:
     st.session_state.calculate = False
 if 'uploaded_values' not in st.session_state:
     st.session_state.uploaded_values = {}
 if 'uploaded_file_name' not in st.session_state:
     st.session_state.uploaded_file_name = None
+
 
 # Datei-Upload mit Format-Hinweisen
 st.sidebar.markdown("### 📁 Eigene Daten hochladen")
@@ -263,7 +401,8 @@ if uploaded_file is not None and st.session_state.uploaded_file_name != uploaded
     parsed_values = parse_uploaded_data(uploaded_file, mineral_group)
     if parsed_values is not None:
         st.session_state.uploaded_values = parsed_values
-        for oxide in default_oxides[mineral_group]:
+        # Update session_state.oxide_values for the current mineral_group based on uploaded data
+        for oxide in DEFAULT_OXIDES_MAP.get(mineral_group, []): # Use DEFAULT_OXIDES_MAP
             if oxide in parsed_values:
                 st.session_state.oxide_values[oxide] = parsed_values[oxide]
         st.session_state.calculate = True
@@ -278,8 +417,9 @@ if st.session_state.uploaded_file_name:
 
 # Button zum Laden der Beispieldaten
 if st.sidebar.button("🔄 Beispieldaten laden"):
-    example = example_data[mineral_group]
-    for oxide in default_oxides[mineral_group]:
+    # Use EXAMPLE_DATA_MAP here
+    example = EXAMPLE_DATA_MAP.get(mineral_group, {})
+    for oxide in DEFAULT_OXIDES_MAP.get(mineral_group, []): # Use DEFAULT_OXIDES_MAP
         st.session_state.oxide_values[oxide] = example.get(oxide, 0.0)
     st.session_state.calculate = True
     st.rerun()
@@ -288,15 +428,17 @@ if st.sidebar.button("🔄 Beispieldaten laden"):
 st.subheader("Chemische Zusammensetzung (Gewichts%)")
 with st.container():
     cols = st.columns(3)
-    for i, oxide in enumerate(default_oxides[mineral_group]):
+    # Use DEFAULT_OXIDES_MAP here
+    for i, oxide in enumerate(DEFAULT_OXIDES_MAP.get(mineral_group, [])):
         with cols[i % 3]:
+            # Make key unique to mineral group to prevent state issues on group change
             st.session_state.oxide_values[oxide] = st.number_input(
                 f"{oxide} (Gew.%)",
                 min_value=0.0,
                 max_value=100.0,
-                value=st.session_state.oxide_values[oxide],
+                value=st.session_state.oxide_values.get(oxide, 0.0), # Use .get() for safety
                 step=0.01,
-                key=f"input_{oxide}"
+                key=f"input_{mineral_group}_{oxide}"
             )
 
 # Basis-Sauerstoffatome
@@ -313,12 +455,13 @@ if mineral_group == "Allgemein":
 # Berechnung durchführen
 if st.button("🔢 Mineralformel berechnen") or st.session_state.calculate:
     st.session_state.calculate = False
-    oxide_values = {oxide: st.session_state.oxide_values[oxide] for oxide in default_oxides[mineral_group]}
+    # Ensure oxide_values are only for the current mineral group's expected oxides
+    oxide_values = {oxide: st.session_state.oxide_values.get(oxide, 0.0) for oxide in DEFAULT_OXIDES_MAP.get(mineral_group, [])}
 
     total_weight = sum(oxide_values.values())
     if total_weight < 95 or total_weight > 105:
         st.warning(f"⚠️ Die Summe der Oxide ({total_weight:.1f}%) weicht stark von 100% ab. Ist das korrekt?")
-    elif total_weight == 0:
+    elif total_weight == 0 and any(DEFAULT_OXIDES_MAP.get(mineral_group, [])): # Only warn if there are expected oxides but all values are 0
         st.warning("⚠️ Alle Werte sind 0. Bitte geben Sie gültige Daten ein.")
     else:
         result = calculate_mineral_formula(oxide_values, basis_oxygen, mineral_group)
