@@ -1,5 +1,3 @@
-
-# The content of cell zyApWimM3kEa will be saved into app.py
 from pathlib import Path
 
 import streamlit as st
@@ -10,7 +8,6 @@ import pdfplumber
 # import mag4 # 'mag4' was imported but not used in the provided code, consider removing if not needed.
 
 # Ihre benutzerdefinierte Logik für Mineralformeln
-# We will explicitly import what's needed from mineral_formula.py, but not default_oxides or example_data
 from mineral_formula import (
     calculate_mineral_formula,
     format_mineral_formula,
@@ -20,6 +17,37 @@ from mineral_formula import (
     element_order,
     find_data_file,
 )
+
+GROUP_NAME_CANONICAL = {
+    "olivine group": "Olivin",
+    "olivine": "Olivin",
+    "olivin": "Olivin",
+    "pyroxene group": "Pyroxen",
+    "pyroxen": "Pyroxen",
+    "pyroxene": "Pyroxen",
+    "garnet group": "Granat",
+    "garnet": "Granat",
+    "granat": "Granat",
+    "amphibole group": "Amphibol",
+    "amphibol": "Amphibol",
+    "mica group": "Glimmer",
+    "phyllosilicate": "Glimmer",
+    "glimmer": "Glimmer",
+    "feldspar group": "Feldspat",
+    "feldspat": "Feldspat",
+    "spinel group": "Spinell",
+    "spinel": "Spinell",
+    "epidote group": "Epidot",
+    "epidote": "Epidot",
+    "allgemein": "Allgemein",
+    "general": "Allgemein",
+}
+
+def canonical_mineral_group(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return value
+    normalized = str(value).strip().lower()
+    return GROUP_NAME_CANONICAL.get(normalized, str(value).strip())
 
 # --- Load and process MRMinerals.csv for mineral identification ---
 try:
@@ -31,27 +59,41 @@ try:
     # Flexible handling: accept alternative column names for the mineral group
     import ast
 
-    # Find a suitable group column if 'Mineralgruppe' is missing
-    if 'Mineralgruppe' not in df_minerals_data.columns:
-        group_col = None
-        for col in df_minerals_data.columns:
-            if col.strip().lower() in ('mineralgruppe', 'group', 'subgroup', 'mineral name', 'mineralname'):
-                group_col = col
-                break
-        if group_col:
-            df_minerals_data = df_minerals_data.rename(columns={group_col: 'Mineralgruppe'})
+    # Find a suitable group column and prioritize structural group fields over mineral names.
+    group_col = None
+    for col in df_minerals_data.columns:
+        if col.strip().lower() in ('mineralgruppe', 'subgroup', 'group'):
+            group_col = col
+            break
+    if group_col:
+        df_minerals_data = df_minerals_data.rename(columns={group_col: 'Mineralgruppe'})
+    else:
+        st.error("❌ Die Datei 'MRMinerals.csv' muss eine Spalte für Mineralgruppen enthalten (z. B. 'Subgroup' oder 'Group').")
+        st.stop()
+
+    # Normalize subgroup names into canonical categories used by the formula logic
+    df_minerals_data['Mineralgruppe'] = df_minerals_data['Mineralgruppe'].apply(canonical_mineral_group)
 
     # If oxide values are provided as a dict-string in a single column (e.g. 'Oxide wt%' or 'Elemental wt%'),
     # try to expand them into separate columns so the rest of the app can process them.
     oxide_dict_col = None
-    for col in df_minerals_data.columns:
-        lower = col.strip().lower()
-        if 'oxide' in lower and ('wt' in lower or '%' in lower):
-            oxide_dict_col = col
+    oxide_preferred = ['oxide wt%', 'oxid wt%', 'oxide wt', 'oxides wt%', ' oxide wt%', 'elemental wt%', 'elemental wt', 'elemental wt%']
+    for preferred in oxide_preferred:
+        for col in df_minerals_data.columns:
+            if col.strip().lower() == preferred:
+                oxide_dict_col = col
+                break
+        if oxide_dict_col:
             break
-        if 'elemental' in lower and ('wt' in lower or '%' in lower):
-            oxide_dict_col = col
-            break
+    if oxide_dict_col is None:
+        for col in df_minerals_data.columns:
+            lower = col.strip().lower()
+            if 'oxide' in lower and ('wt' in lower or '%' in lower):
+                oxide_dict_col = col
+                break
+            if 'elemental' in lower and ('wt' in lower or '%' in lower):
+                oxide_dict_col = col
+                break
 
     if oxide_dict_col:
         def _parse_dict_cell(cell):
@@ -82,11 +124,11 @@ try:
         st.error("❌ Die Datei 'MRMinerals.csv' muss eine Spalte 'Mineralgruppe' enthalten.")
         st.stop()
 
-    MINERAL_GROUPS = sorted(df_minerals_data['Mineralgruppe'].unique().tolist())
+    initial_mineral_groups_from_csv = sorted(df_minerals_data['Mineralgruppe'].unique().tolist())
     DEFAULT_OXIDES_MAP = {}
     EXAMPLE_DATA_MAP = {}
 
-    for group in MINERAL_GROUPS:
+    for group in initial_mineral_groups_from_csv:
         group_df = df_minerals_data[df_minerals_data['Mineralgruppe'] == group]
         # Identify oxide columns - assume all columns except 'Mineralgruppe' are oxides
         # Exclude other non-oxide columns if any are identified
@@ -108,19 +150,24 @@ try:
         EXAMPLE_DATA_MAP[group] = example_row.fillna(0).to_dict() # Fill NaN with 0 for example data
 
     # If no mineral groups with valid oxides were found after processing the CSV
-    if not DEFAULT_OXIDES_MAP:
+    if not DEFAULT_OXIDES_MAP: # This would be true if all groups were ignored
         st.error("❌ Keine Mineralgruppen in 'MRMinerals.csv' gefunden oder keine gültigen Oxide zugeordnet. Bitte überprüfen Sie die Datei.")
         st.stop()
 
-    # Add a general option if it's missing and if the original app supported it
-    if "Allgemein" not in MINERAL_GROUPS:
-        MINERAL_GROUPS.append("Allgemein")
+    # Now, construct the final MINERAL_GROUPS list for the selectbox
+    # It should include all groups from DEFAULT_OXIDES_MAP keys.
+    MINERAL_GROUPS_FOR_SELECTBOX = sorted(list(DEFAULT_OXIDES_MAP.keys()))
+
+    # Add a general option if it's missing
+    if "Allgemein" not in MINERAL_GROUPS_FOR_SELECTBOX:
+        MINERAL_GROUPS_FOR_SELECTBOX.append("Allgemein")
         # For 'Allgemein', list all known oxides from molar_masses
         DEFAULT_OXIDES_MAP["Allgemein"] = sorted(list(molar_masses.keys()), key=lambda x: element_order.get(x, 999))
         EXAMPLE_DATA_MAP["Allgemein"] = {oxide: 0.0 for oxide in DEFAULT_OXIDES_MAP["Allgemein"]}
 
-    # Re-sort MINERAL_GROUPS to ensure 'Allgemein' is included and sorted alphabetically
-    MINERAL_GROUPS = sorted(list(DEFAULT_OXIDES_MAP.keys()))
+    # Re-sort MINERAL_GROUPS to ensure 'Allgemein' is included and sorted alphabetically, or put 'Allgemein' at top if desired.
+    MINERAL_GROUPS = sorted(MINERAL_GROUPS_FOR_SELECTBOX)
+    # --- End Debugging outputs ---
 
 except FileNotFoundError:
     st.error("❌ Die Datei 'MRMinerals.csv' wurde nicht gefunden. Bitte stellen Sie sicher, dass sie im Verzeichnis '/content/' liegt.")
@@ -328,11 +375,111 @@ def parse_uploaded_data(uploaded_file, mineral_group):
         st.error(f"❌ Fehler beim Lesen der Datei: {str(e)}")
         return None
 
+
+def find_mineral_matches(parsed_values, df, top_n=5):
+    """Vergleicht die hochgeladenen Oxid-Werte mit Einträgen in df (MRMinerals.csv) und liefert Top-N Kandidaten.
+
+    Rückgabe: Liste von Diktaten mit Feldern: 'Mineral name', 'Chemical formula', 'Mineralgruppe', 'distance'
+    """
+    # Bestimme mögliche Oxid-Spalten in df (alles außer bekannte Metadaten)
+    metadata_cols = set([c for c in df.columns if c.strip().lower() in (
+        'mineral name', 'mineralname', 'mineralgruppe', 'group', 'subgroup', 'chemical formula',
+        'machine readable formula', 'elemental wt%', 'oxide wt%')])
+    oxide_cols = [c for c in df.columns if c not in metadata_cols]
+
+    candidates = []
+    # Normalisiere parsed_values
+    pv = {k: float(v) for k, v in parsed_values.items()}
+    sum_pv = sum(pv.values())
+    pv_norm = {k: (v / sum_pv * 100.0) if sum_pv > 0 else 0.0 for k, v in pv.items()}
+
+    for _, row in df.iterrows():
+        # Baue Reihen-Oxid-Dict
+        row_ox = {}
+        for col in oxide_cols:
+            try:
+                val = row[col]
+                if pd.isna(val):
+                    continue
+                row_ox[col] = float(val)
+            except Exception:
+                continue
+
+        # Normiere Reihen-Oxide
+        sum_row = sum(row_ox.values())
+        row_norm = {k: (v / sum_row * 100.0) if sum_row > 0 else 0.0 for k, v in row_ox.items()}
+
+        # Vereinigung der Keys
+        keys = set(pv_norm.keys()) | set(row_norm.keys())
+        if not keys:
+            continue
+
+        # Erzeuge Vektoren und berechne L2-Distanz
+        diff_sq = 0.0
+        for k in keys:
+            a = pv_norm.get(k, 0.0)
+            b = row_norm.get(k, 0.0)
+            diff_sq += (a - b) ** 2
+        distance = diff_sq ** 0.5
+
+        candidates.append({
+            'Mineral name': row.get('Mineral name') if 'Mineral name' in df.columns else row.get('Mineralname', ''),
+            'Chemical formula': row.get('Chemical formula') if 'Chemical formula' in df.columns else '',
+            'Mineralgruppe': row.get('Mineralgruppe') if 'Mineralgruppe' in df.columns else row.get('Group', ''),
+            'distance': float(distance),
+            'row_index': row.name,
+            'row_ox': row_ox,
+            'row_norm': row_norm,
+        })
+
+    # Sortiere und gebe Top-N zurück
+    candidates = sorted(candidates, key=lambda x: x['distance'])[:top_n]
+    return candidates
+
 # --- Streamlit UI ---
-mineral_group = st.sidebar.selectbox(
-    "Mineralgruppe auswählen",
-    MINERAL_GROUPS # Use MINERAL_GROUPS from CSV
-)
+def apply_candidate_selection():
+    """Callback: setzt die Mineralgruppe basierend auf der ausgewählten Match-Kandidaten-Selectbox."""
+    sel = st.session_state.get('candidate_select')
+    opts = st.session_state.get('candidate_options')
+    if not sel or not opts or 'match_candidates' not in st.session_state:
+        return
+    try:
+        idx = opts.index(sel)
+    except Exception:
+        idx = 0
+    try:
+        cand = st.session_state['match_candidates'][idx]
+    except Exception:
+        return
+    group = cand.get('Mineralgruppe') or cand.get('Mineral group') or cand.get('Group') or None
+    if group and group in MINERAL_GROUPS:
+        # Setze die selectbox value via session_state, der selectbox verwendet den key 'selected_mineral_group'
+        st.session_state['selected_mineral_group'] = group
+        # Aktualisiere aktuelle Gruppe (aber übernehme Referenzwerte erst nach Bestätigung)
+        st.session_state['current_mineral_group'] = group
+        # Lege einen Vorschlag (pending) mit Referenz-Oxidwerten an, zur Bestätigung durch den Benutzer
+        row_ox = cand.get('row_ox') if isinstance(cand, dict) else None
+        expected = DEFAULT_OXIDES_MAP.get(group, [])
+        pending = {'group': group, 'row_ox': {}, 'expected': expected}
+        if row_ox:
+            for oxide in expected:
+                if oxide in row_ox:
+                    try:
+                        pending['row_ox'][oxide] = float(row_ox[oxide])
+                    except Exception:
+                        pending['row_ox'][oxide] = 0.0
+        # speichere den Vorschlag in session_state; Benutzer muss Übernehmen klicken
+        st.session_state['pending_reference'] = pending
+        # keine direkte Übernahme mehr; UI zeigt jetzt Vorschlag mit Buttons
+        return
+
+
+
+# Mineralgruppe-Auswahl (jetzt im Hauptbereich)
+mineral_group = st.session_state.get('selected_mineral_group') if 'selected_mineral_group' in st.session_state else None
+if mineral_group not in MINERAL_GROUPS:
+    mineral_group = MINERAL_GROUPS[0]
+    st.session_state['selected_mineral_group'] = mineral_group
 
 # Session State initialisieren und bei Mineralgruppenwechsel zurücksetzen
 if 'current_mineral_group' not in st.session_state or st.session_state.current_mineral_group != mineral_group:
@@ -407,16 +554,82 @@ if uploaded_file is not None and st.session_state.uploaded_file_name != uploaded
                 st.session_state.oxide_values[oxide] = parsed_values[oxide]
         st.session_state.calculate = True
         st.session_state.uploaded_file_name = uploaded_file.name
+        # Führe Matching gegen die MRMinerals-Daten durch und speichere Kandidaten
+        try:
+            st.session_state.match_candidates = find_mineral_matches(parsed_values, df_minerals_data, top_n=5)
+            # Default Auswahl auf den besten Kandidaten
+            if st.session_state.match_candidates:
+                st.session_state.selected_candidate_index = 0
+        except Exception:
+            st.session_state.match_candidates = []
+            st.session_state.selected_candidate_index = None
         st.success(f"✅ Daten aus '{uploaded_file.name}' erfolgreich übernommen.")
         st.rerun()
     else:
         st.session_state.uploaded_file_name = None
 
 if st.session_state.uploaded_file_name:
-    st.sidebar.caption(f"📄 Letzte Datei: {st.session_state.uploaded_file_name}")
+    st.caption(f"📄 Letzte Datei: {st.session_state.uploaded_file_name}")
+
+# Wenn Matching-Kandidaten vorhanden sind, zeige sie zur Auswahl
+if 'match_candidates' in st.session_state and st.session_state.match_candidates:
+    options = [f"{c.get('Mineral name','')} ({c.get('Chemical formula','')}) — Dist {c.get('distance',0):.2f}" for c in st.session_state.match_candidates]
+    # Speichere options in session_state, damit der Callback sie verwenden kann
+    st.session_state['candidate_options'] = options
+    # Selectbox mit Callback, die beim Ändern die Mineralgruppe setzt
+    sel = st.selectbox(
+        "Erkannte Mineral-Kandidaten (höchste Ähnlichkeit oben)",
+        options,
+        index=st.session_state.get('selected_candidate_index', 0),
+        key='candidate_select',
+        on_change=apply_candidate_selection,
+    )
+    # Speichere den Index
+    try:
+        st.session_state.selected_candidate_index = options.index(sel)
+    except Exception:
+        st.session_state.selected_candidate_index = 0
+
+    # Handler: Übernehme den pending_reference in die Eingabefelder
+    def confirm_pending_reference():
+        pending = st.session_state.get('pending_reference')
+        if not pending:
+            return
+        group = pending.get('group')
+        expected = pending.get('expected', [])
+        row_ox = pending.get('row_ox', {})
+        # Setze Mineralgruppe und oxide_values
+        st.session_state['selected_mineral_group'] = group
+        st.session_state['current_mineral_group'] = group
+        new_vals = {oxide: float(row_ox.get(oxide, 0.0)) for oxide in expected}
+        st.session_state['oxide_values'] = new_vals
+        # entferne pending
+        st.session_state.pop('pending_reference', None)
+        st.experimental_rerun()
+
+    def discard_pending_reference():
+        st.session_state.pop('pending_reference', None)
+        st.experimental_rerun()
+
+    # Wenn ein Vorschlag existiert, zeige ihn zur Bestätigung an
+    if 'pending_reference' in st.session_state and st.session_state['pending_reference']:
+        pending = st.session_state['pending_reference']
+        with st.expander("Referenzvorschlag anzeigen"):
+            st.write(f"Vorgeschlagene Mineralgruppe: **{pending.get('group')}**")
+            if pending.get('row_ox'):
+                st.write("Vorgeschlagene Oxid-Werte:")
+                for ox, val in pending['row_ox'].items():
+                    st.write(f"- {ox}: {val}")
+            else:
+                st.write("Keine Referenz-Oxidwerte in der gewählten Zeile gefunden.")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.button("Übernehmen", on_click=confirm_pending_reference)
+            with col2:
+                st.button("Verwerfen", on_click=discard_pending_reference)
 
 # Button zum Laden der Beispieldaten
-if st.sidebar.button("🔄 Beispieldaten laden"):
+if st.button("🔄 Beispieldaten laden"):
     # Use EXAMPLE_DATA_MAP here
     example = EXAMPLE_DATA_MAP.get(mineral_group, {})
     for oxide in DEFAULT_OXIDES_MAP.get(mineral_group, []): # Use DEFAULT_OXIDES_MAP
@@ -468,7 +681,67 @@ if st.button("🔢 Mineralformel berechnen") or st.session_state.calculate:
 
         if result:
             st.subheader("Ergebnis")
-            st.markdown(f"**Mineralformel:** `{result['formula']}`")
+            # Zeige die Formel und daneben den Mineralnamen (falls aus der CSV verfügbar)
+            col_formula, col_name = st.columns([3, 1])
+            with col_formula:
+                st.markdown(f"**Mineralformel:** `{result['formula']}`")
+            with col_name:
+                # Versuche zuerst, einen erkannten Kandidaten anzuzeigen
+                cand = None
+                mcands = st.session_state.get('match_candidates')
+                sel_idx = st.session_state.get('selected_candidate_index', 0)
+                if mcands:
+                    try:
+                        cand = mcands[sel_idx]
+                    except Exception:
+                        cand = mcands[0] if mcands else None
+
+                # Falls kein Kandidat gewählt wurde, aber ein pending_reference existiert,
+                # zeige die zugehörige Gruppe als Hinweis
+                if not cand and 'pending_reference' in st.session_state:
+                    pending = st.session_state['pending_reference']
+                    st.markdown(f"**Vorgeschlagene Mineralgruppe:** `{pending.get('group')}`")
+
+                # Wenn ein Kandidat vorhanden ist, hole den Mineralnamen möglichst verlässlich
+                if cand:
+                    mineral_name = cand.get('Mineral name') or cand.get('Mineralname') or ''
+                    # Wenn der Kandidat keine Namen-Spalte enthält, versuche, über row_index aus df nachzusehen
+                    if not mineral_name and 'row_index' in cand:
+                        try:
+                            row = df_minerals_data.loc[int(cand['row_index'])]
+                            for col in ('Mineral name', 'Mineralname', 'mineralname'):
+                                if col in row.index and pd.notna(row[col]):
+                                    mineral_name = row[col]
+                                    break
+                        except Exception:
+                            mineral_name = ''
+
+                    if mineral_name:
+                        st.markdown(f"**Mineralname (erkannt):** `{mineral_name}`")
+                    else:
+                        st.markdown("**Mineralname (erkannt):** (kein Name verfügbar)")
+
+                    # Referenzformel und Abstand
+                    ref_formula = cand.get('Chemical formula') or cand.get('chemical formula') or ''
+                    if ref_formula:
+                        st.markdown(f"**Referenzformel:** `{ref_formula}`")
+                    try:
+                        st.markdown(f"**Ähnlichkeitsabstand:** {float(cand.get('distance', 0.0)):.2f}")
+                    except Exception:
+                        pass
+                else:
+                    # Fallback: Gruppenname oder erster Mineralname der Gruppe aus der CSV
+                    try:
+                        names = []
+                        for col in ('Mineral name', 'Mineralname'):
+                            if col in df_minerals_data.columns:
+                                names = df_minerals_data.loc[df_minerals_data['Mineralgruppe'] == mineral_group, col].dropna().unique().tolist()
+                                if names:
+                                    break
+                    except Exception:
+                        names = []
+                    mineral_name_display = names[0] if names else mineral_group
+                    st.markdown(f"**Mineralname:** `{mineral_name_display}`")
 
             # Tabelle der Kationen
             cations_df = pd.DataFrame.from_dict(result["cations"], orient="index", columns=["Kationen"])
